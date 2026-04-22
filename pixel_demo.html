@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Glow & Co — Pixel Demo Store</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'DM Sans',sans-serif;background:#fafaf8;color:#0e0e0d}
+.nav{background:white;border-bottom:1px solid #eee;padding:0 40px;height:56px;display:flex;align-items:center;justify-content:space-between}
+.nav-logo{font-size:18px;font-weight:500;letter-spacing:.05em}
+.nav-links{display:flex;gap:24px;font-size:13px;color:#888}
+.hero{background:linear-gradient(135deg,#534AB7 0%,#3C3489 100%);color:white;padding:60px 40px;text-align:center}
+.hero h1{font-size:36px;font-weight:300;margin-bottom:8px}
+.hero p{font-size:15px;opacity:.7;margin-bottom:24px}
+.hero-btn{background:white;color:#534AB7;padding:12px 28px;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;border:none;font-family:'DM Sans',sans-serif}
+.products{max-width:1000px;margin:48px auto;padding:0 24px}
+.products h2{font-size:20px;font-weight:500;margin-bottom:24px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;margin-bottom:48px}
+.card{background:white;border:1px solid #eee;border-radius:12px;overflow:hidden;transition:transform .2s}
+.card:hover{transform:translateY(-2px)}
+.card-img{height:160px;display:flex;align-items:center;justify-content:center;font-size:40px}
+.card-body{padding:16px}
+.card-name{font-size:14px;font-weight:500;margin-bottom:4px}
+.card-variant{font-size:11px;color:#888;margin-bottom:8px}
+.card-price{font-size:18px;font-weight:500;color:#534AB7;margin-bottom:10px}
+.card-margin{font-size:10px;background:#EAF3DE;color:#3B6D11;padding:2px 6px;border-radius:3px;font-family:monospace;margin-bottom:10px;display:inline-block}
+.atc-btn{width:100%;background:#534AB7;color:white;border:none;border-radius:6px;padding:9px;font-size:12px;font-weight:500;cursor:pointer;font-family:'DM Sans',sans-serif;transition:background .15s}
+.atc-btn:hover{background:#3C3489}
+.atc-btn:active{transform:scale(.98)}
+
+/* PIXEL CONSOLE */
+.console{position:fixed;bottom:0;left:0;right:0;background:#0e0e0d;color:#00ff88;font-family:monospace;font-size:11px;max-height:220px;overflow-y:auto;z-index:1000}
+.console-hdr{background:#1a1a1a;padding:7px 14px;display:flex;align-items:center;justify-content:space-between;border-top:2px solid #534AB7;cursor:pointer}
+.console-hdr-left{display:flex;align-items:center;gap:8px}
+.console-dot{width:6px;height:6px;border-radius:50%;background:#00ff88;animation:blink 1.5s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+.console-title{color:white;font-size:11px;font-weight:600}
+.console-badge{background:#534AB7;color:white;font-size:9px;padding:1px 6px;border-radius:3px}
+.console-body{padding:10px 14px;max-height:160px;overflow-y:auto}
+.log-entry{padding:4px 0;border-bottom:1px solid #1a1a1a;display:flex;gap:10px;align-items:flex-start}
+.log-time{color:#555;flex-shrink:0}
+.log-event{color:#00ff88;font-weight:600;flex-shrink:0;min-width:140px}
+.log-data{color:#aaa;word-break:break-all}
+.log-entry.fire .log-event{color:#FFD700}
+.log-entry.error .log-event{color:#FF6B6B}
+
+/* TOAST */
+.toast{position:fixed;top:20px;right:20px;background:#0e0e0d;color:white;padding:12px 18px;border-radius:8px;font-size:12px;z-index:2000;opacity:0;transform:translateY(-10px);transition:all .3s;border-left:3px solid #534AB7}
+.toast.show{opacity:1;transform:translateY(0)}
+.toast-icon{color:#00ff88;margin-right:6px}
+</style>
+</head>
+<body>
+
+<div class="nav">
+  <div class="nav-logo">GLOW & CO</div>
+  <div class="nav-links">
+    <span>Skincare</span>
+    <span>Serums</span>
+    <span>SPF</span>
+    <span>Bestsellers</span>
+  </div>
+</div>
+
+<div class="hero">
+  <h1>Skincare that works</h1>
+  <p>Science-backed formulas for every skin type</p>
+  <button class="hero-btn" onclick="fireEvent('hero_click', {element:'CTA button'})">Shop bestsellers</button>
+</div>
+
+<div class="products">
+  <h2>Bestsellers</h2>
+  <div class="grid" id="product-grid"></div>
+</div>
+
+<!-- PIXEL CONSOLE -->
+<div class="console" id="pixel-console">
+  <div class="console-hdr" onclick="toggleConsole()">
+    <div class="console-hdr-left">
+      <div class="console-dot"></div>
+      <span class="console-title">ProfitAgent Pixel — Live Event Stream</span>
+      <span class="console-badge" id="event-count">0 events</span>
+    </div>
+    <span style="color:#555;font-size:10px">click to expand ↑</span>
+  </div>
+  <div class="console-body" id="console-body" style="display:none">
+    <div class="log-entry" style="color:#555;padding:6px 0">Waiting for events…</div>
+  </div>
+</div>
+
+<div class="toast" id="toast"><span class="toast-icon">✓</span><span id="toast-msg">Event fired</span></div>
+
+<!-- INSTALL PIXEL -->
+<script src="https://profitagent2-production.up.railway.app/pixel/pa.js" data-store="GLOW-CO-DEMO"></script>
+
+<script>
+window.PA_DEBUG = true;
+
+const products = [
+  {name:'Vitamin C Brightening Serum',variant:'30ml',price:'£38.99',margin:'74%',emoji:'💛',color:'#FFF9E6'},
+  {name:'Hyaluronic Acid Moisturiser',variant:'50ml',price:'£32.99',margin:'74%',emoji:'💙',color:'#E6F0FF'},
+  {name:'SPF 50 Daily Defence Cream',variant:'75ml',price:'£27.99',margin:'72%',emoji:'☀️',color:'#FFF3E6'},
+  {name:'Retinol Night Repair Cream',variant:'30ml',price:'£44.99',margin:'70%',emoji:'🌙',color:'#F0E6FF'},
+  {name:'Niacinamide Pore Serum',variant:'30ml',price:'£34.99',margin:'74%',emoji:'🧴',color:'#E6FFF5'},
+  {name:'Rose Hip Facial Oil',variant:'25ml',price:'£29.99',margin:'77%',emoji:'🌹',color:'#FFE6E6'},
+];
+
+// Render products
+const grid = document.getElementById('product-grid');
+products.forEach((p,i) => {
+  grid.innerHTML += `
+    <div class="card">
+      <div class="card-img" style="background:${p.color}">${p.emoji}</div>
+      <div class="card-body">
+        <div class="card-name">${p.name}</div>
+        <div class="card-variant">${p.variant}</div>
+        <div class="card-price">${p.price}</div>
+        <div class="card-margin">margin: ${p.margin}</div>
+        <button class="atc-btn add-to-cart" onclick="addToCart('${p.name}','${p.price}',${i})">Add to cart</button>
+      </div>
+    </div>`;
+});
+
+// Event counter
+let eventCount = 0;
+
+// Log to console
+function logEvent(type, name, data) {
+  eventCount++;
+  document.getElementById('event-count').textContent = eventCount + ' event' + (eventCount !== 1 ? 's' : '');
+
+  const body = document.getElementById('console-body');
+  const now = new Date().toLocaleTimeString('en-GB', {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const entry = document.createElement('div');
+  entry.className = 'log-entry ' + type;
+  entry.innerHTML = `<span class="log-time">${now}</span><span class="log-event">⚡ ${name}</span><span class="log-data">${JSON.stringify(data)}</span>`;
+  body.prepend(entry);
+
+  // Show console if hidden
+  if (body.style.display === 'none') {
+    body.style.display = 'block';
+  }
+}
+
+// Show toast
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  document.getElementById('toast-msg').textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+// Add to cart
+function addToCart(name, price, index) {
+  const data = {product: name, price: price, quantity: 1};
+  fireEvent('add_to_cart', data);
+  showToast('Added to cart — event fired ✓');
+}
+
+// Generic fire event
+function fireEvent(eventName, data) {
+  if (window.ProfitAgentPixel) {
+    window.ProfitAgentPixel.track(eventName, data);
+  }
+  logEvent('fire', eventName, data);
+}
+
+// Intercept pixel events
+const origFetch = window.fetch;
+window.fetch = function(url, opts) {
+  if (url && url.toString().indexOf('/pixel/event') > -1) {
+    try {
+      const body = JSON.parse(opts.body);
+      logEvent('fire', body.event, body.properties || {});
+    } catch(e) {}
+  }
+  return origFetch.apply(this, arguments);
+};
+
+function toggleConsole() {
+  const body = document.getElementById('console-body');
+  const btn = document.querySelector('.console-hdr span:last-child');
+  if (body.style.display === 'none') {
+    body.style.display = 'block';
+    btn.textContent = 'click to collapse ↓';
+  } else {
+    body.style.display = 'none';
+    btn.textContent = 'click to expand ↑';
+  }
+}
+
+// Track product views on scroll
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      const name = e.target.querySelector('.card-name');
+      if (name) fireEvent('product_view', {product: name.textContent});
+      observer.unobserve(e.target);
+    }
+  });
+}, {threshold: 0.5});
+
+document.querySelectorAll('.card').forEach(c => observer.observe(c));
+
+// Auto-fire initial page_view log
+logEvent('fire', 'page_view', {path: window.location.pathname, store: 'GLOW-CO-DEMO'});
+logEvent('fire', 'pixel_loaded', {store_id: 'GLOW-CO-DEMO', version: '1.0.0'});
+</script>
+</body>
+</html>
