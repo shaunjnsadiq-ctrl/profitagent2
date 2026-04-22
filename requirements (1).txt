@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+anthropic
+openai
+pandas
+scipy
+numpy
+python-multipart
+pydantic
