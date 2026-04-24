@@ -1,9 +1,9 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, RedirectResponse
 from pydantic import BaseModel
 from typing import Optional
-import sys, os, json, hashlib
+import sys, os, json, hashlib, base64
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -69,9 +69,18 @@ class LoadDataRequest(BaseModel):
     email: str
     token: str
 
+# ── HEALTH ────────────────────────────────────────────────────────────────────
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "ProfitAgent Analytics Backend", "version": "2.0.0", "supabase": "connected" if get_sb() else "not configured"}
+    return {
+        "status": "ok",
+        "service": "ProfitAgent Analytics Backend",
+        "version": "2.0.0",
+        "supabase": "connected" if get_sb() else "not configured"
+    }
+
+# ── AUTH ──────────────────────────────────────────────────────────────────────
 
 @app.post("/api/auth/signup")
 async def signup(req: SignupRequest):
@@ -81,9 +90,20 @@ async def signup(req: SignupRequest):
     try:
         existing = sb.table("accounts").select("id").eq("email", email).execute()
         if existing.data: raise HTTPException(409, "An account with this email already exists. Please sign in.")
-        result = sb.table("accounts").insert({"email": email, "password_hash": hash_pw(req.password), "name": req.name, "store_name": req.store_name, "plan": "beta", "created_at": datetime.utcnow().isoformat()}).execute()
+        result = sb.table("accounts").insert({
+            "email": email,
+            "password_hash": hash_pw(req.password),
+            "name": req.name,
+            "store_name": req.store_name,
+            "plan": "beta",
+            "created_at": datetime.utcnow().isoformat()
+        }).execute()
         acc = result.data[0]
-        return {"status": "ok", "user": {"id": acc["id"], "email": acc["email"], "name": acc["name"], "store_name": acc["store_name"], "plan": acc["plan"], "token": make_token(email, acc["id"])}}
+        return {"status": "ok", "user": {
+            "id": acc["id"], "email": acc["email"], "name": acc["name"],
+            "store_name": acc["store_name"], "plan": acc["plan"],
+            "token": make_token(email, acc["id"])
+        }}
     except HTTPException: raise
     except Exception as e: raise HTTPException(500, f"Signup error: {e}")
 
@@ -97,9 +117,15 @@ async def login(req: LoginRequest):
         if not result.data: raise HTTPException(401, "Incorrect email or password.")
         acc = result.data[0]
         sb.table("accounts").update({"last_login": datetime.utcnow().isoformat()}).eq("id", acc["id"]).execute()
-        return {"status": "ok", "user": {"id": acc["id"], "email": acc["email"], "name": acc["name"], "store_name": acc["store_name"], "plan": acc["plan"], "token": make_token(email, acc["id"])}}
+        return {"status": "ok", "user": {
+            "id": acc["id"], "email": acc["email"], "name": acc["name"],
+            "store_name": acc["store_name"], "plan": acc["plan"],
+            "token": make_token(email, acc["id"])
+        }}
     except HTTPException: raise
     except Exception as e: raise HTTPException(500, f"Login error: {e}")
+
+# ── DATA ──────────────────────────────────────────────────────────────────────
 
 @app.post("/api/data/save")
 async def save_data(req: SaveDataRequest):
@@ -135,6 +161,8 @@ async def load_data(req: LoadDataRequest):
     except HTTPException: raise
     except Exception as e: raise HTTPException(500, f"Load error: {e}")
 
+# ── ANALYSIS ──────────────────────────────────────────────────────────────────
+
 @app.post("/api/analyse")
 async def analyse(req: AnalyseRequest):
     if not req.question.strip(): raise HTTPException(400, "Question cannot be empty")
@@ -143,7 +171,13 @@ async def analyse(req: AnalyseRequest):
     from analysis import TOOL_DESCRIPTIONS, run_tool
     from llm_router import run_analysis
     try:
-        result = await run_analysis(question=req.question, store_data=req.store_data.model_dump(), provider=req.provider, api_key=req.api_key, model=req.model)
+        result = await run_analysis(
+            question=req.question,
+            store_data=req.store_data.model_dump(),
+            provider=req.provider,
+            api_key=req.api_key,
+            model=req.model
+        )
         return {"status": "ok", "result": result}
     except Exception as e:
         error_msg = str(e)
@@ -155,6 +189,8 @@ async def analyse(req: AnalyseRequest):
 def list_tools():
     from analysis import TOOL_DESCRIPTIONS
     return {"tools": [{"name": t["name"], "description": t["description"]} for t in TOOL_DESCRIPTIONS]}
+
+# ── PIXEL ─────────────────────────────────────────────────────────────────────
 
 pixel_events = []
 
@@ -181,9 +217,32 @@ async def get_events(store_id: str = None, limit: int = 50):
     if store_id: events = [e for e in events if e.get("store_id") == store_id]
     return {"status": "ok", "count": len(events), "events": list(reversed(events))}
 
-# ── SHOPIFY OAUTH ROUTES ──────────────────────────────────────────────────────
+# ── SHOPIFY OAUTH ─────────────────────────────────────────────────────────────
 
-from fastapi.responses import RedirectResponse
+@app.get("/")
+async def root_shopify_handler(
+    request: Request,
+    shop: str = None,
+    hmac: str = None,
+    host: str = None,
+    timestamp: str = None,
+    code: str = None,
+    state: str = None
+):
+    """
+    Root handler — catches Shopify redirecting to / instead of /shopify/callback.
+    If Shopify OAuth params are present, forwards to the callback handler.
+    """
+    if shop and hmac:
+        return await shopify_callback(
+            request=request,
+            shop=shop,
+            code=code,
+            state=state,
+            hmac=hmac
+        )
+    return {"status": "ok", "service": "ProfitAgent", "version": "2.0.0"}
+
 
 @app.get("/shopify/install")
 async def shopify_install(shop: str):
@@ -205,31 +264,30 @@ async def shopify_callback(
 ):
     """Step 2 — Shopify redirects back here after merchant approves."""
     from shopify_oauth import verify_hmac, exchange_code_for_token, get_shop_data
-    import os
 
     if not shop or not code:
         raise HTTPException(400, "Missing shop or code parameter")
 
-    # Verify HMAC
+    # Verify HMAC signature
     params = dict(request.query_params)
     if not verify_hmac(params.copy()):
         raise HTTPException(403, "Invalid HMAC — request may be forged")
 
     try:
-        # Exchange code for permanent token
+        # Exchange code for permanent access token
         access_token = await exchange_code_for_token(shop, code)
 
         # Store token in Supabase
-        sb = get_sb()
-        if sb:
-            existing = sb.table("shopify_tokens").select("id").eq("shop_domain", shop).execute()
+        db = get_sb()
+        if db:
+            existing = db.table("shopify_tokens").select("id").eq("shop_domain", shop).execute()
             if existing.data:
-                sb.table("shopify_tokens").update({
+                db.table("shopify_tokens").update({
                     "access_token": access_token,
                     "updated_at": datetime.utcnow().isoformat()
                 }).eq("shop_domain", shop).execute()
             else:
-                sb.table("shopify_tokens").insert({
+                db.table("shopify_tokens").insert({
                     "shop_domain": shop,
                     "access_token": access_token,
                     "scope": "read_orders,read_products,read_inventory,read_analytics",
@@ -239,8 +297,7 @@ async def shopify_callback(
         # Pull initial store data
         store_data = await get_shop_data(shop, access_token)
 
-        # Redirect back to dashboard with data encoded
-        import json, base64
+        # Redirect to frontend dashboard with store data
         encoded = base64.urlsafe_b64encode(json.dumps(store_data).encode()).decode()
         frontend = os.environ.get("FRONTEND_URL", "https://ecom-profitagent.netlify.app")
         return RedirectResponse(url=f"{frontend}/agent?shopify_data={encoded}&shop={shop}")
@@ -253,14 +310,12 @@ async def shopify_callback(
 async def shopify_sync(shop_domain: str, email: str = None):
     """Manually trigger a data sync for a connected store."""
     from shopify_oauth import get_shop_data
-    sb = get_sb()
-    if not sb:
+    db = get_sb()
+    if not db:
         raise HTTPException(503, "Database not configured")
-
-    result = sb.table("shopify_tokens").select("access_token").eq("shop_domain", shop_domain).execute()
+    result = db.table("shopify_tokens").select("access_token").eq("shop_domain", shop_domain).execute()
     if not result.data:
         raise HTTPException(404, "Store not connected. Please install ProfitAgent first.")
-
     access_token = result.data[0]["access_token"]
     store_data = await get_shop_data(shop_domain, access_token)
     return {"status": "ok", "data": store_data}
@@ -269,10 +324,10 @@ async def shopify_sync(shop_domain: str, email: str = None):
 @app.get("/shopify/status/{shop_domain}")
 async def shopify_status(shop_domain: str):
     """Check if a shop is connected."""
-    sb = get_sb()
-    if not sb:
+    db = get_sb()
+    if not db:
         return {"connected": False}
-    result = sb.table("shopify_tokens").select("shop_domain,installed_at").eq("shop_domain", shop_domain).execute()
+    result = db.table("shopify_tokens").select("shop_domain,installed_at").eq("shop_domain", shop_domain).execute()
     if result.data:
         return {"connected": True, "shop": result.data[0]["shop_domain"], "since": result.data[0]["installed_at"]}
     return {"connected": False}
