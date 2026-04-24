@@ -424,7 +424,9 @@ async def get_today_briefing(email: str, token: str):
 
 @app.post("/briefing/run-now")
 async def run_briefing_now(email: str, token: str):
-    import asyncio
+    """Run briefing inline — waits for completion and returns the result."""
+    import json as _json
+    from datetime import date
 
     db = get_sb()
     if not db:
@@ -437,25 +439,122 @@ async def run_briefing_now(email: str, token: str):
     if token != make_token(email.lower().strip(), acc["id"]):
         raise HTTPException(401, "Invalid token")
 
-    if not acc.get("shopify_domain"):
+    shop_domain = acc.get("shopify_domain")
+    if not shop_domain:
         raise HTTPException(400, "No Shopify store connected")
 
-    async def run():
-        try:
-            from daily_briefing import process_store, get_sb as briefing_get_sb
-            brief_sb = briefing_get_sb()
-            token_result = brief_sb.table("shopify_tokens") \
-                .select("access_token") \
-                .eq("shop_domain", acc["shopify_domain"]) \
-                .execute()
-            if token_result.data:
-                access_token = token_result.data[0]["access_token"]
-                await process_store(brief_sb, acc["shopify_domain"], access_token, acc["id"])
-        except Exception as e:
-            print(f"Manual briefing error: {e}")
+    # Get Shopify access token
+    token_result = db.table("shopify_tokens").select("access_token").eq("shop_domain", shop_domain).execute()
+    if not token_result.data:
+        raise HTTPException(404, "Shopify token not found")
+    access_token = token_result.data[0]["access_token"]
 
-    asyncio.create_task(run())
-    return {"status": "ok", "message": "Briefing running in background — refresh in 30 seconds"}
+    # Get Anthropic key — user's own first, master key as fallback
+    anthropic_key = None
+    try:
+        key_result = db.table("accounts").select("anthropic_key").eq("id", acc["id"]).execute()
+        if key_result.data:
+            anthropic_key = key_result.data[0].get("anthropic_key")
+    except Exception:
+        pass
+    if not anthropic_key:
+        anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if not anthropic_key:
+        raise HTTPException(503, "No Anthropic API key configured")
+
+    try:
+        # 1. Fetch live Shopify data
+        from shopify_oauth import get_shop_data
+        store_data = await get_shop_data(shop_domain, access_token, days=30)
+
+        # 2. Build Claude prompt
+        currency = store_data.get("currency", "GBP")
+        symbol = "£" if currency == "GBP" else "$"
+        prompt = f"""You are ProfitAgent, an ecommerce profit intelligence system.
+Analyse this store's data and return a JSON briefing. Today is {date.today().isoformat()}.
+
+STORE DATA:
+- Store: {store_data.get('store', 'Unknown')}
+- Revenue (last 30 days): {symbol}{store_data.get('rev', 0):,.2f}
+- Orders: {store_data.get('orders', 0)}
+- AOV: {symbol}{store_data.get('aov', 0):,.2f}
+- Revenue growth vs prior period: {store_data.get('rev_growth', 0)}%
+- Order growth: {store_data.get('order_growth', 0)}%
+- Refund rate: {store_data.get('refund_rate', 0)}%
+- Total discounts given: {symbol}{store_data.get('total_discounts', 0):,.2f}
+- Google Ads spend: {symbol}{store_data.get('google', 0):,.2f}
+- Meta Ads spend: {symbol}{store_data.get('meta', 0):,.2f}
+- TikTok Ads spend: {symbol}{store_data.get('tiktok', 0):,.2f}
+- Email/SMS spend: {symbol}{store_data.get('email', 0):,.2f}
+- Product count: {store_data.get('product_count', 0)}
+- Top SKUs: {json.dumps(store_data.get('skus', [])[:5])}
+
+Return ONLY valid JSON, no markdown fences, no preamble:
+{{
+  "summary": "2-3 sentence plain English briefing of the last 30 days and what needs attention today.",
+  "profit_leaks": [
+    {{"title": "Short title", "description": "What is leaking and why", "estimated_impact": "{symbol}X/month", "severity": "high|medium|low"}}
+  ],
+  "opportunities": [
+    {{"title": "Short title", "description": "What to do and expected outcome", "estimated_uplift": "{symbol}X/month", "priority": 1}}
+  ],
+  "daily_tasks": [
+    {{"task": "Specific task to do today", "reason": "Why this matters", "effort": "5min|15min|30min|1hr"}}
+  ],
+  "alerts": [
+    {{"type": "warning|critical|info", "title": "Alert title", "detail": "What triggered this"}}
+  ],
+  "health_score": 75
+}}
+Include 2-4 profit leaks, 2-4 opportunities ranked by impact, 3 daily tasks.
+Only include alerts genuinely triggered by the data.
+If revenue is 0, focus on setup tasks and getting first orders."""
+
+        # 3. Call Claude
+        import httpx
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": anthropic_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json"
+                },
+                json={
+                    "model": "claude-sonnet-4-20250514",
+                    "max_tokens": 2000,
+                    "messages": [{"role": "user", "content": prompt}]
+                }
+            )
+            resp.raise_for_status()
+            raw = resp.json()["content"][0]["text"].strip()
+
+        # Strip markdown fences if present
+        if "```" in raw:
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+        briefing = _json.loads(raw.strip())
+
+        # 4. Save to Supabase
+        today = date.today().isoformat()
+        db.table("daily_briefings").upsert({
+            "shop_domain":   shop_domain,
+            "account_id":    acc["id"],
+            "date":          today,
+            "summary":       briefing.get("summary", ""),
+            "profit_leaks":  _json.dumps(briefing.get("profit_leaks", [])),
+            "opportunities": _json.dumps(briefing.get("opportunities", [])),
+            "daily_tasks":   _json.dumps(briefing.get("daily_tasks", [])),
+            "alerts":        _json.dumps(briefing.get("alerts", [])),
+            "metrics":       _json.dumps({"health_score": briefing.get("health_score", 0), **{k: store_data.get(k,0) for k in ["rev","orders","aov","rev_growth","refund_rate"]}}),
+            "ai_provider":   "anthropic",
+        }, on_conflict="shop_domain,date").execute()
+
+        return {"status": "ok", "message": "Briefing generated successfully", "health_score": briefing.get("health_score"), "date": today}
+
+    except Exception as e:
+        raise HTTPException(500, f"Briefing failed: {str(e)}")
 
 
 # ── ENTRY POINT ───────────────────────────────────────────────────────────────
