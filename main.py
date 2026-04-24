@@ -294,6 +294,14 @@ async def shopify_callback(
                     "installed_at": datetime.utcnow().isoformat()
                 }).execute()
 
+            # Link this shop to the most recently created account that has no shop yet
+            try:
+                db.table("accounts").update({
+                    "shopify_domain": shop
+                }).is_("shopify_domain", "null").order("created_at", desc=True).limit(1).execute()
+            except Exception:
+                pass
+
         # Pull initial store data
         store_data = await get_shop_data(shop, access_token)
 
@@ -331,6 +339,50 @@ async def shopify_status(shop_domain: str):
     if result.data:
         return {"connected": True, "shop": result.data[0]["shop_domain"], "since": result.data[0]["installed_at"]}
     return {"connected": False}
+
+
+@app.get("/shopify/data")
+async def shopify_data(email: str, token: str, days: int = 30):
+    """
+    Called by the frontend after login to auto-populate the dashboard
+    with live Shopify data for the logged-in user's connected store.
+    """
+    from shopify_oauth import get_shop_data
+
+    # Validate user token
+    db = get_sb()
+    if not db:
+        raise HTTPException(503, "Database not configured")
+
+    acc_result = db.table("accounts").select("id, shopify_domain").eq("email", email.lower().strip()).execute()
+    if not acc_result.data:
+        raise HTTPException(401, "Invalid session")
+
+    acc = acc_result.data[0]
+    if token != make_token(email.lower().strip(), acc["id"]):
+        raise HTTPException(401, "Invalid token")
+
+    # Get shopify domain — either stored on account or look up from tokens table
+    shop_domain = acc.get("shopify_domain")
+    if not shop_domain:
+        # Fall back: find most recently installed token for this account
+        token_result = db.table("shopify_tokens").select("shop_domain").order("installed_at", desc=True).limit(1).execute()
+        if not token_result.data:
+            return {"connected": False, "message": "No Shopify store connected"}
+        shop_domain = token_result.data[0]["shop_domain"]
+
+    # Get access token
+    token_result = db.table("shopify_tokens").select("access_token").eq("shop_domain", shop_domain).execute()
+    if not token_result.data:
+        return {"connected": False, "message": "No Shopify store connected"}
+
+    access_token = token_result.data[0]["access_token"]
+
+    try:
+        store_data = await get_shop_data(shop_domain, access_token, days=days)
+        return {"status": "ok", "connected": True, "data": store_data}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to fetch Shopify data: {str(e)}")
 
 
 if __name__ == "__main__":
