@@ -229,10 +229,6 @@ async def root_shopify_handler(
     code: str = None,
     state: str = None
 ):
-    """
-    Root handler — catches Shopify redirecting to / instead of /shopify/callback.
-    If Shopify OAuth params are present, forwards to the callback handler.
-    """
     if shop and hmac:
         return await shopify_callback(
             request=request,
@@ -246,7 +242,6 @@ async def root_shopify_handler(
 
 @app.get("/shopify/install")
 async def shopify_install(shop: str):
-    """Step 1 — Redirect merchant to Shopify OAuth consent screen."""
     from shopify_oauth import get_install_url
     if not shop:
         raise HTTPException(400, "Shop parameter required")
@@ -262,22 +257,18 @@ async def shopify_callback(
     state: str = None,
     hmac: str = None
 ):
-    """Step 2 — Shopify redirects back here after merchant approves."""
     from shopify_oauth import verify_hmac, exchange_code_for_token, get_shop_data
 
     if not shop or not code:
         raise HTTPException(400, "Missing shop or code parameter")
 
-    # Verify HMAC signature
     params = dict(request.query_params)
     if not verify_hmac(params.copy()):
         raise HTTPException(403, "Invalid HMAC — request may be forged")
 
     try:
-        # Exchange code for permanent access token
         access_token = await exchange_code_for_token(shop, code)
 
-        # Store token in Supabase
         db = get_sb()
         if db:
             existing = db.table("shopify_tokens").select("id").eq("shop_domain", shop).execute()
@@ -294,7 +285,6 @@ async def shopify_callback(
                     "installed_at": datetime.utcnow().isoformat()
                 }).execute()
 
-            # Link this shop to the most recently created account that has no shop yet
             try:
                 db.table("accounts").update({
                     "shopify_domain": shop
@@ -302,10 +292,7 @@ async def shopify_callback(
             except Exception:
                 pass
 
-        # Pull initial store data
         store_data = await get_shop_data(shop, access_token)
-
-        # Redirect to frontend dashboard with store data
         encoded = base64.urlsafe_b64encode(json.dumps(store_data).encode()).decode()
         frontend = os.environ.get("FRONTEND_URL", "https://ecom-profitagent.netlify.app")
         return RedirectResponse(url=f"{frontend}/agent?shopify_data={encoded}&shop={shop}")
@@ -316,7 +303,6 @@ async def shopify_callback(
 
 @app.get("/shopify/sync/{shop_domain}")
 async def shopify_sync(shop_domain: str, email: str = None):
-    """Manually trigger a data sync for a connected store."""
     from shopify_oauth import get_shop_data
     db = get_sb()
     if not db:
@@ -331,7 +317,6 @@ async def shopify_sync(shop_domain: str, email: str = None):
 
 @app.get("/shopify/status/{shop_domain}")
 async def shopify_status(shop_domain: str):
-    """Check if a shop is connected."""
     db = get_sb()
     if not db:
         return {"connected": False}
@@ -343,13 +328,8 @@ async def shopify_status(shop_domain: str):
 
 @app.get("/shopify/data")
 async def shopify_data(email: str, token: str, days: int = 30):
-    """
-    Called by the frontend after login to auto-populate the dashboard
-    with live Shopify data for the logged-in user's connected store.
-    """
     from shopify_oauth import get_shop_data
 
-    # Validate user token
     db = get_sb()
     if not db:
         raise HTTPException(503, "Database not configured")
@@ -362,16 +342,13 @@ async def shopify_data(email: str, token: str, days: int = 30):
     if token != make_token(email.lower().strip(), acc["id"]):
         raise HTTPException(401, "Invalid token")
 
-    # Get shopify domain — either stored on account or look up from tokens table
     shop_domain = acc.get("shopify_domain")
     if not shop_domain:
-        # Fall back: find most recently installed token for this account
         token_result = db.table("shopify_tokens").select("shop_domain").order("installed_at", desc=True).limit(1).execute()
         if not token_result.data:
             return {"connected": False, "message": "No Shopify store connected"}
         shop_domain = token_result.data[0]["shop_domain"]
 
-    # Get access token
     token_result = db.table("shopify_tokens").select("access_token").eq("shop_domain", shop_domain).execute()
     if not token_result.data:
         return {"connected": False, "message": "No Shopify store connected"}
@@ -384,28 +361,18 @@ async def shopify_data(email: str, token: str, days: int = 30):
     except Exception as e:
         raise HTTPException(500, f"Failed to fetch Shopify data: {str(e)}")
 
-"""
-ADD THESE ROUTES TO main.py
-Paste them just before the final:
-    if __name__ == "__main__":
-"""
 
 # ── DAILY BRIEFING ────────────────────────────────────────────────────────────
 
 @app.get("/briefing/today")
 async def get_today_briefing(email: str, token: str):
-    """
-    Returns today's AI-generated briefing for the user's connected store.
-    Called by the frontend on login and dashboard load.
-    """
     import json as _json
-    from datetime import date
+    from datetime import date, timedelta
 
     db = get_sb()
     if not db:
         raise HTTPException(503, "Database not configured")
 
-    # Auth
     acc_result = db.table("accounts").select("id, shopify_domain").eq("email", email.lower().strip()).execute()
     if not acc_result.data:
         raise HTTPException(401, "Invalid session")
@@ -425,21 +392,17 @@ async def get_today_briefing(email: str, token: str):
         .execute()
 
     if not result.data:
-        # No briefing yet today — check if yesterday's exists as fallback
-        from datetime import timedelta
         yesterday = (date.today() - timedelta(days=1)).isoformat()
         result = db.table("daily_briefings") \
             .select("*") \
             .eq("shop_domain", shop_domain) \
             .eq("date", yesterday) \
             .execute()
-
         if not result.data:
             return {"status": "no_briefing", "message": "Daily briefing not yet generated"}
 
     row = result.data[0]
 
-    # Parse JSONB fields
     def parse(val):
         if isinstance(val, str):
             try: return _json.loads(val)
@@ -461,18 +424,12 @@ async def get_today_briefing(email: str, token: str):
 
 @app.post("/briefing/run-now")
 async def run_briefing_now(email: str, token: str):
-    """
-    Manually trigger a briefing for the user's store.
-    Useful for testing — also callable from the dashboard.
-    """
-    import subprocess
-    import sys
+    import asyncio
 
     db = get_sb()
     if not db:
         raise HTTPException(503, "Database not configured")
 
-    # Auth
     acc_result = db.table("accounts").select("id, shopify_domain").eq("email", email.lower().strip()).execute()
     if not acc_result.data:
         raise HTTPException(401, "Invalid session")
@@ -483,12 +440,9 @@ async def run_briefing_now(email: str, token: str):
     if not acc.get("shopify_domain"):
         raise HTTPException(400, "No Shopify store connected")
 
-    # Run async in background
-    import asyncio
-    from daily_briefing import process_store, get_sb as briefing_get_sb
-
     async def run():
         try:
+            from daily_briefing import process_store, get_sb as briefing_get_sb
             brief_sb = briefing_get_sb()
             token_result = brief_sb.table("shopify_tokens") \
                 .select("access_token") \
@@ -501,74 +455,11 @@ async def run_briefing_now(email: str, token: str):
             print(f"Manual briefing error: {e}")
 
     asyncio.create_task(run())
-
     return {"status": "ok", "message": "Briefing running in background — refresh in 30 seconds"}
+
+
+# ── ENTRY POINT ───────────────────────────────────────────────────────────────
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
-@app.get("/briefing/today")
-async def get_today_briefing(email: str, token: str):
-    """
-    Returns today's AI-generated briefing for the user's connected store.
-    Called by the frontend on login and dashboard load.
-    """
-    import json as _json
-    from datetime import date
- 
-    db = get_sb()
-    if not db:
-        raise HTTPException(503, "Database not configured")
- 
-    # Auth
-    acc_result = db.table("accounts").select("id, shopify_domain").eq("email", email.lower().strip()).execute()
-    if not acc_result.data:
-        raise HTTPException(401, "Invalid session")
-    acc = acc_result.data[0]
-    if token != make_token(email.lower().strip(), acc["id"]):
-        raise HTTPException(401, "Invalid token")
- 
-    shop_domain = acc.get("shopify_domain")
-    if not shop_domain:
-        return {"status": "no_store", "message": "No Shopify store connected"}
- 
-    today = date.today().isoformat()
-    result = db.table("daily_briefings") \
-        .select("*") \
-        .eq("shop_domain", shop_domain) \
-        .eq("date", today) \
-        .execute()
- 
-    if not result.data:
-        # No briefing yet today — check if yesterday's exists as fallback
-        from datetime import timedelta
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
-        result = db.table("daily_briefings") \
-            .select("*") \
-            .eq("shop_domain", shop_domain) \
-            .eq("date", yesterday) \
-            .execute()
- 
-        if not result.data:
-            return {"status": "no_briefing", "message": "Daily briefing not yet generated"}
- 
-    row = result.data[0]
- 
-    # Parse JSONB fields
-    def parse(val):
-        if isinstance(val, str):
-            try: return _json.loads(val)
-            except: return []
-        return val or []
- 
-    return {
-        "status": "ok",
-        "date": row["date"],
-        "summary": row.get("summary", ""),
-        "profit_leaks": parse(row.get("profit_leaks")),
-        "opportunities": parse(row.get("opportunities")),
-        "daily_tasks": parse(row.get("daily_tasks")),
-        "alerts": parse(row.get("alerts")),
-        "metrics": parse(row.get("metrics")),
-        "shop_domain": shop_domain,
-    }
-
