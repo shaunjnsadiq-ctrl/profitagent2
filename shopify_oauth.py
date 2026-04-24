@@ -15,17 +15,20 @@ SHOPIFY_SCOPES = "read_orders,read_products,read_inventory,read_analytics,read_c
 BACKEND_URL = os.environ.get("BACKEND_URL", "https://profitagent2-production.up.railway.app")
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://ecom-profitagent.netlify.app")
 
+REDIRECT_URI = f"{BACKEND_URL}/shopify/callback"
+
 
 def get_install_url(shop_domain: str) -> str:
     shop = shop_domain.replace("https://", "").replace("http://", "").replace("www.", "").strip("/")
     if not shop.endswith(".myshopify.com"):
         shop = shop.split(".")[0] + ".myshopify.com"
 
-    # Do NOT include redirect_uri — Shopify uses the registered callback automatically
     params = {
         "client_id": SHOPIFY_API_KEY,
         "scope": SHOPIFY_SCOPES,
+        "redirect_uri": REDIRECT_URI,
         "state": hashlib.sha256(f"{shop}{SHOPIFY_API_SECRET}profitagent".encode()).hexdigest()[:16],
+        "grant_options[]": "per-user"
     }
     return f"https://{shop}/admin/oauth/authorize?" + urllib.parse.urlencode(params)
 
