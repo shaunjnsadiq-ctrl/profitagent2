@@ -388,3 +388,114 @@ async def shopify_data(email: str, token: str, days: int = 30):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+@app.get("/briefing/today")
+async def get_today_briefing(email: str, token: str):
+    """
+    Returns today's AI-generated briefing for the user's connected store.
+    Called by the frontend on login and dashboard load.
+    """
+    import json as _json
+    from datetime import date
+ 
+    db = get_sb()
+    if not db:
+        raise HTTPException(503, "Database not configured")
+ 
+    # Auth
+    acc_result = db.table("accounts").select("id, shopify_domain").eq("email", email.lower().strip()).execute()
+    if not acc_result.data:
+        raise HTTPException(401, "Invalid session")
+    acc = acc_result.data[0]
+    if token != make_token(email.lower().strip(), acc["id"]):
+        raise HTTPException(401, "Invalid token")
+ 
+    shop_domain = acc.get("shopify_domain")
+    if not shop_domain:
+        return {"status": "no_store", "message": "No Shopify store connected"}
+ 
+    today = date.today().isoformat()
+    result = db.table("daily_briefings") \
+        .select("*") \
+        .eq("shop_domain", shop_domain) \
+        .eq("date", today) \
+        .execute()
+ 
+    if not result.data:
+        # No briefing yet today — check if yesterday's exists as fallback
+        from datetime import timedelta
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        result = db.table("daily_briefings") \
+            .select("*") \
+            .eq("shop_domain", shop_domain) \
+            .eq("date", yesterday) \
+            .execute()
+ 
+        if not result.data:
+            return {"status": "no_briefing", "message": "Daily briefing not yet generated"}
+ 
+    row = result.data[0]
+ 
+    # Parse JSONB fields
+    def parse(val):
+        if isinstance(val, str):
+            try: return _json.loads(val)
+            except: return []
+        return val or []
+ 
+    return {
+        "status": "ok",
+        "date": row["date"],
+        "summary": row.get("summary", ""),
+        "profit_leaks": parse(row.get("profit_leaks")),
+        "opportunities": parse(row.get("opportunities")),
+        "daily_tasks": parse(row.get("daily_tasks")),
+        "alerts": parse(row.get("alerts")),
+        "metrics": parse(row.get("metrics")),
+        "shop_domain": shop_domain,
+    }
+ 
+ 
+@app.post("/briefing/run-now")
+async def run_briefing_now(email: str, token: str):
+    """
+    Manually trigger a briefing for the user's store.
+    Useful for testing — also callable from the dashboard.
+    """
+    import subprocess
+    import sys
+ 
+    db = get_sb()
+    if not db:
+        raise HTTPException(503, "Database not configured")
+ 
+    # Auth
+    acc_result = db.table("accounts").select("id, shopify_domain").eq("email", email.lower().strip()).execute()
+    if not acc_result.data:
+        raise HTTPException(401, "Invalid session")
+    acc = acc_result.data[0]
+    if token != make_token(email.lower().strip(), acc["id"]):
+        raise HTTPException(401, "Invalid token")
+ 
+    if not acc.get("shopify_domain"):
+        raise HTTPException(400, "No Shopify store connected")
+ 
+    # Run async in background
+    import asyncio
+    from daily_briefing import process_store, get_sb as briefing_get_sb
+ 
+    async def run():
+        try:
+            brief_sb = briefing_get_sb()
+            token_result = brief_sb.table("shopify_tokens") \
+                .select("access_token") \
+                .eq("shop_domain", acc["shopify_domain"]) \
+                .execute()
+            if token_result.data:
+                access_token = token_result.data[0]["access_token"]
+                await process_store(brief_sb, acc["shopify_domain"], access_token, acc["id"])
+        except Exception as e:
+            print(f"Manual briefing error: {e}")
+ 
+    asyncio.create_task(run())
+ 
+    return {"status": "ok", "message": "Briefing running in background — refresh in 30 seconds"}
