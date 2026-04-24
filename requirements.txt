@@ -8,3 +8,4 @@ numpy
 python-multipart
 pydantic
 supabase
+httpx
